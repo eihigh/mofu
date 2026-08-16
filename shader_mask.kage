@@ -1,0 +1,55 @@
+//kage:unit pixels
+
+package main
+
+// The canvas-space rectangle that the mask buffer (source image 1) covers:
+// (minX, minY, maxX, maxY).
+var MaskRect vec4
+
+// The inverse of the GeoM the model is drawn with, row-major:
+// (a, b, tx, c, d, ty). It takes destination pixels back to canvas pixels.
+var InvGeoM [6]float
+
+// 1 for an inverted mask, 0 for a normal one.
+var MaskInverted float
+
+// maskAlpha samples the mask buffer bilinearly at a local pixel position.
+// imageSrc1At returns 0 outside the buffer, so the mask fades to "no
+// coverage" past its edges, which is exactly the clipping semantics.
+func maskAlpha(p vec2) float {
+	base := imageSrc0Origin()
+	p0 := p - 0.5
+	p1 := p + 0.5
+	c0 := imageSrc1At(base + p0).a
+	c1 := imageSrc1At(base + vec2(p1.x, p0.y)).a
+	c2 := imageSrc1At(base + vec2(p0.x, p1.y)).a
+	c3 := imageSrc1At(base + p1).a
+	rate := fract(p1)
+	return mix(mix(c0, c1, rate.x), mix(c2, c3, rate.x), rate.y)
+}
+
+// Cubism's fragment maths plus clipping, in one pass.
+//
+// color carries (multiplyR, multiplyG, multiplyB, opacity) and custom carries
+// (screenR, screenG, screenB, unused), as in the unmasked shader.
+func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
+	src := imageSrc0At(srcPos)
+	if src.a == 0 {
+		return vec4(0)
+	}
+	rgb := src.rgb / src.a
+	rgb *= color.rgb
+	rgb = rgb + custom.rgb - rgb*custom.rgb
+	a := src.a * color.a
+
+	// Map this fragment back to canvas space, then into the mask buffer.
+	d := dstPos.xy - imageDstOrigin()
+	cx := InvGeoM[0]*d.x + InvGeoM[1]*d.y + InvGeoM[2]
+	cy := InvGeoM[3]*d.x + InvGeoM[4]*d.y + InvGeoM[5]
+	uv := (vec2(cx, cy) - MaskRect.xy) / (MaskRect.zw - MaskRect.xy)
+	m := maskAlpha(uv * imageSrc1Size())
+	if MaskInverted != 0 {
+		m = 1 - m
+	}
+	return vec4(rgb*a, a) * m
+}

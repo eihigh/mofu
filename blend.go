@@ -35,27 +35,4 @@ var (
 		BlendOperationRGB:           ebiten.BlendOperationAdd,
 		BlendOperationAlpha:         ebiten.BlendOperationAdd,
 	}
-
-	// blendMaskApply multiplies the destination by the source's alpha:
-	// dst = dst * srcA. Drawing the mask buffer over a rendered drawable with
-	// this blend is how clipping is applied without a second sampler.
-	blendMaskApply = ebiten.Blend{
-		BlendFactorSourceRGB:        ebiten.BlendFactorZero,
-		BlendFactorSourceAlpha:      ebiten.BlendFactorZero,
-		BlendFactorDestinationRGB:   ebiten.BlendFactorSourceAlpha,
-		BlendFactorDestinationAlpha: ebiten.BlendFactorSourceAlpha,
-		BlendOperationRGB:           ebiten.BlendOperationAdd,
-		BlendOperationAlpha:         ebiten.BlendOperationAdd,
-	}
-
-	// blendMaskApplyInverted is blendMaskApply for inverted masks:
-	// dst = dst * (1 - srcA).
-	blendMaskApplyInverted = ebiten.Blend{
-		BlendFactorSourceRGB:        ebiten.BlendFactorZero,
-		BlendFactorSourceAlpha:      ebiten.BlendFactorZero,
-		BlendFactorDestinationRGB:   ebiten.BlendFactorOneMinusSourceAlpha,
-		BlendFactorDestinationAlpha: ebiten.BlendFactorOneMinusSourceAlpha,
-		BlendOperationRGB:           ebiten.BlendOperationAdd,
-		BlendOperationAlpha:         ebiten.BlendOperationAdd,
-	}
 )

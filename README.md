@@ -148,6 +148,15 @@ func main() {
 
 A `Model` is immutable and shareable; a `Player` holds one instance's playback
 state, so draw the same model many times by making several players.
+`DrawOptions.ColorScale` tints and fades the whole model, with the usual
+Ebitengine zero-value-is-identity semantics.
+
+Clipping masks are handled the way the official Cubism renderers handle them:
+each unique mask combination is rendered once per frame into a small
+off-screen buffer fitted to the mask's current bounding box, and clipped
+meshes sample that buffer from inside the fragment shader. A clipped mesh
+therefore costs one draw call like any other mesh, instead of a stack of
+full-screen composites.
 
 Vertex positions come out in canvas pixels with the origin at the top left, so
 `Model.CanvasSize` is the box to fit with `DrawOptions.GeoM`.
@@ -252,6 +261,13 @@ bake pipeline. Tests needing it skip when no C compiler is available.
 Tests for the `mofu` package itself import Ebitengine, whose package
 initialiser needs a display; on a headless machine run them under
 `xvfb-run -a go test ./...`.
+
+The GPU side of the mask renderer cannot run inside `go test` (Ebitengine
+needs the process's main thread), so it has its own pixel-level check:
+
+```sh
+xvfb-run -a go run ./internal/gputest
+```
 
 ## Licence
 

@@ -11,9 +11,12 @@ import (
 	"github.com/hajimehoshi/ebiten/v2"
 )
 
-func TestShaderCompiles(t *testing.T) {
+func TestShadersCompile(t *testing.T) {
 	if _, err := ebiten.NewShader(shaderSrc); err != nil {
-		t.Fatalf("the embedded Kage shader does not compile: %v", err)
+		t.Fatalf("the base Kage shader does not compile: %v", err)
+	}
+	if _, err := ebiten.NewShader(maskShaderSrc); err != nil {
+		t.Fatalf("the mask Kage shader does not compile: %v", err)
 	}
 }
 
@@ -177,9 +180,9 @@ func TestSampleAndSortOrder(t *testing.T) {
 
 	p := newGeometryPlayer(f)
 	p.samplePose(&p.cur, &p.pose)
-	for i := range p.pose.states {
-		p.pose.states[i].opacity *= 0.5 // the draw call's Alpha
-	}
+	var cs ebiten.ColorScale
+	cs.ScaleAlpha(0.5) // the draw call's whole-model fade
+	p.applyColorScale(&cs)
 	p.sortOrder()
 
 	if got := p.order; got[0] != 1 || got[1] != 2 || got[2] != 0 {
@@ -188,7 +191,7 @@ func TestSampleAndSortOrder(t *testing.T) {
 	if p.pose.states[1].visible {
 		t.Error("mesh 1 should be invisible")
 	}
-	// Opacity 0.5 scaled by the draw call's alpha of 0.5.
+	// Opacity 0.5 scaled by the draw call's colour-scale alpha of 0.5.
 	if !closeTo(p.pose.states[2].opacity, 0.25) {
 		t.Errorf("mesh 2 opacity = %v, want 0.25", p.pose.states[2].opacity)
 	}
@@ -342,5 +345,59 @@ func TestModelNames(t *testing.T) {
 	}
 	if got := m.HitAreaNames(); len(got) != 1 || got[0] != "Tri" {
 		t.Errorf("HitAreaNames = %v", got)
+	}
+}
+
+func TestBuildMaskGroups(t *testing.T) {
+	f := &mofufmt.File{Meshes: []mofufmt.Mesh{
+		{ID: "maskA"},                      // 0
+		{ID: "maskB"},                      // 1
+		{ID: "eyeL", Masks: []int32{0, 1}}, // same set...
+		{ID: "eyeR", Masks: []int32{1, 0}}, // ...in a different order
+		{ID: "mouth", Masks: []int32{1}},
+		{ID: "plain"},
+		{ID: "broken", Masks: []int32{99, -1}}, // only bogus indices
+	}}
+	groups, of := buildMaskGroups(f)
+	if len(groups) != 2 {
+		t.Fatalf("got %d groups, want 2 (eyes shared, mouth separate): %v", len(groups), groups)
+	}
+	if of[0] != -1 || of[1] != -1 || of[5] != -1 {
+		t.Errorf("unclipped meshes should map to -1, got %v", of)
+	}
+	if of[2] != of[3] {
+		t.Errorf("order-permuted mask lists should share a group, got %d and %d", of[2], of[3])
+	}
+	if of[2] == of[4] {
+		t.Error("different mask sets should not share a group")
+	}
+	if of[6] != -1 {
+		t.Errorf("a mask list of only invalid indices should mean unclipped, got %d", of[6])
+	}
+}
+
+func TestMaskBounds(t *testing.T) {
+	po := pose{positions: [][]float32{
+		{10, 20, 30, 5, 15, 40}, // mesh 0: x in [10,30], y in [5,40]
+		{100, 100, 100, 100},    // mesh 1: degenerate point
+	}}
+	rect, ok := maskBounds(&po, []int32{0})
+	if !ok {
+		t.Fatal("bounds of a real triangle reported empty")
+	}
+	want := [4]float32{10, 5, 30, 40}
+	if rect != want {
+		t.Errorf("rect = %v, want %v", rect, want)
+	}
+	if _, ok := maskBounds(&po, []int32{1}); ok {
+		t.Error("a zero-area mask should report empty")
+	}
+	if _, ok := maskBounds(&po, nil); ok {
+		t.Error("an empty group should report empty")
+	}
+	// A union of both still gets the full box.
+	rect, ok = maskBounds(&po, []int32{0, 1})
+	if !ok || rect != [4]float32{10, 5, 100, 100} {
+		t.Errorf("union rect = %v ok=%v, want [10 5 100 100] true", rect, ok)
 	}
 }

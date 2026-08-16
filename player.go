@@ -77,10 +77,17 @@ type Player struct {
 	scratch   pose // prev's sample during a fade
 	poseValid bool
 
-	verts   [][]ebiten.Vertex
-	order   []int
-	maskBuf *ebiten.Image
-	partBuf *ebiten.Image
+	verts [][]ebiten.Vertex
+	order []int
+
+	// Per-Draw mask state; see render.go.
+	maskUsable bool
+	invGeoM    [6]float32
+	maskReady  []bool
+	maskEmpty  []bool
+	maskRects  [][4]float32
+	maskBufs   []*ebiten.Image
+	maskVerts  []ebiten.Vertex
 }
 
 // NewPlayer creates a player positioned at the start of the first animation.
@@ -400,10 +407,10 @@ func (p *Player) applyOverlays() {
 type DrawOptions struct {
 	// GeoM maps canvas pixels (see Model.CanvasSize) to the destination.
 	GeoM ebiten.GeoM
-	// Alpha scales the whole model's opacity, for fades. The zero value is
-	// treated as 1, so a freshly declared DrawOptions draws the model fully
-	// opaque; to hide a model, skip the Draw call instead.
-	Alpha float32
+	// ColorScale scales the whole model's colours and opacity, for tints and
+	// fades. Its zero value is the identity, matching Ebitengine's own draw
+	// options.
+	ColorScale ebiten.ColorScale
 }
 
 // Draw renders the current frame into dst.
@@ -415,9 +422,6 @@ func (p *Player) Draw(dst *ebiten.Image, opts *DrawOptions) {
 	if opts != nil {
 		o = *opts
 	}
-	if o.Alpha == 0 {
-		o.Alpha = 1
-	}
 
 	p.samplePose(&p.cur, &p.pose)
 	if p.prev != nil && p.fadeDur > 0 {
@@ -428,16 +432,29 @@ func (p *Player) Draw(dst *ebiten.Image, opts *DrawOptions) {
 		}
 	}
 	p.applyOverlays()
-	if o.Alpha != 1 {
-		for i := range p.pose.states {
-			p.pose.states[i].opacity *= o.Alpha
-		}
-	}
+	p.applyColorScale(&o.ColorScale)
 	p.poseValid = true
 
 	p.buildVerts(&o.GeoM)
+	p.prepareFrame(&o.GeoM)
 	p.sortOrder()
 	p.render(dst)
+}
+
+// applyColorScale folds a whole-model colour scale into the pose: alpha into
+// each mesh's opacity, RGB into its multiply colour.
+func (p *Player) applyColorScale(cs *ebiten.ColorScale) {
+	r, g, b, a := cs.R(), cs.G(), cs.B(), cs.A()
+	if r == 1 && g == 1 && b == 1 && a == 1 {
+		return
+	}
+	for i := range p.pose.states {
+		s := &p.pose.states[i]
+		s.opacity *= a
+		s.multiply[0] *= r
+		s.multiply[1] *= g
+		s.multiply[2] *= b
+	}
 }
 
 // buildVerts transforms the pose's canvas-space positions through geom into

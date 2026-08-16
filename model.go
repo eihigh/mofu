@@ -24,12 +24,16 @@ import (
 //go:embed shader.kage
 var shaderSrc []byte
 
+//go:embed shader_mask.kage
+var maskShaderSrc []byte
+
 // Model is a loaded .mofu file: textures, meshes and animations. It is
 // immutable once loaded and can back any number of Players.
 type Model struct {
-	file     *mofufmt.File
-	textures []*ebiten.Image
-	shader   *ebiten.Shader
+	file       *mofufmt.File
+	textures   []*ebiten.Image
+	shader     *ebiten.Shader
+	maskShader *ebiten.Shader
 
 	// templates hold the parts of each mesh's vertices that never change,
 	// namely the texture coordinates. Players copy from these.
@@ -40,6 +44,12 @@ type Model struct {
 	// overlayDeltas is the overlays' position deltas converted to canvas
 	// pixels, indexed [overlay][mesh]; a nil inner slice means no movement.
 	overlayDeltas [][][]float32
+
+	// maskGroups is the model's unique clipping-mask combinations, and
+	// maskGroupOf maps each mesh to its combination (-1 for unclipped).
+	// Meshes sharing a combination share one rendered mask per frame.
+	maskGroups  [][]int32
+	maskGroupOf []int
 }
 
 // LoadFile reads a .mofu file from disk.
@@ -70,6 +80,11 @@ func New(f *mofufmt.File) (*Model, error) {
 		return nil, fmt.Errorf("mofu: compiling shader: %w", err)
 	}
 	m.shader = shader
+	maskShader, err := ebiten.NewShader(maskShaderSrc)
+	if err != nil {
+		return nil, fmt.Errorf("mofu: compiling mask shader: %w", err)
+	}
+	m.maskShader = maskShader
 
 	m.textures = make([]*ebiten.Image, len(f.Textures))
 	for i, t := range f.Textures {
@@ -135,7 +150,39 @@ func newModelCommon(f *mofufmt.File) *Model {
 		}
 		m.overlayDeltas[oi] = deltas
 	}
+	m.maskGroups, m.maskGroupOf = buildMaskGroups(f)
 	return m
+}
+
+// buildMaskGroups deduplicates the meshes' mask lists into unique
+// combinations. Mask order does not matter -- a mask is the union of its
+// shapes' silhouettes -- so lists are compared as sorted sets, and indices
+// outside the mesh table are dropped.
+func buildMaskGroups(f *mofufmt.File) (groups [][]int32, of []int) {
+	of = make([]int, len(f.Meshes))
+	byKey := map[string]int{}
+	for i := range f.Meshes {
+		of[i] = -1
+		var masks []int32
+		for _, mi := range f.Meshes[i].Masks {
+			if mi >= 0 && int(mi) < len(f.Meshes) {
+				masks = append(masks, mi)
+			}
+		}
+		if len(masks) == 0 {
+			continue
+		}
+		sort.Slice(masks, func(a, b int) bool { return masks[a] < masks[b] })
+		key := fmt.Sprint(masks)
+		gi, ok := byKey[key]
+		if !ok {
+			gi = len(groups)
+			groups = append(groups, masks)
+			byKey[key] = gi
+		}
+		of[i] = gi
+	}
+	return groups, of
 }
 
 func (m *Model) texture(i int32) *ebiten.Image {
