@@ -3,7 +3,7 @@ package mofu
 import (
 	"fmt"
 	"math"
-	"sort"
+	"slices"
 
 	"github.com/eihigh/mofu/mofufmt"
 	"github.com/hajimehoshi/ebiten/v2"
@@ -82,12 +82,13 @@ type Player struct {
 
 	// Per-Draw mask state; see render.go.
 	maskUsable bool
-	invGeoM    [6]float32
+	invGeoM    []float32
 	maskReady  []bool
 	maskEmpty  []bool
-	maskRects  [][4]float32
+	maskRects  [][]float32
 	maskBufs   []*ebiten.Image
 	maskVerts  []ebiten.Vertex
+	uniforms   map[int]map[string]any
 }
 
 // NewPlayer creates a player positioned at the start of the first animation.
@@ -441,12 +442,20 @@ func (p *Player) Draw(dst *ebiten.Image, opts *DrawOptions) {
 	p.render(dst)
 }
 
-// applyColorScale folds a whole-model colour scale into the pose: alpha into
-// each mesh's opacity, RGB into its multiply colour.
+// applyColorScale folds a whole-model colour scale into the pose.
+//
+// ebiten.ColorScale's components are premultiplied-alpha scales (ScaleAlpha
+// scales R, G and B along with A), while the pose's multiply colour scales
+// straight colour, so the RGB factors are un-premultiplied before folding.
+// A pure alpha fade is exact; an RGB tint combined with active screen colours
+// is approximate, because the tint cannot reach the screen term from here.
 func (p *Player) applyColorScale(cs *ebiten.ColorScale) {
 	r, g, b, a := cs.R(), cs.G(), cs.B(), cs.A()
 	if r == 1 && g == 1 && b == 1 && a == 1 {
 		return
+	}
+	if a != 0 {
+		r, g, b = r/a, g/a, b/a
 	}
 	for i := range p.pose.states {
 		s := &p.pose.states[i]
@@ -482,8 +491,8 @@ func (p *Player) sortOrder() {
 	for i := range p.order {
 		p.order[i] = i
 	}
-	sort.SliceStable(p.order, func(a, b int) bool {
-		return p.pose.states[p.order[a]].order < p.pose.states[p.order[b]].order
+	slices.SortStableFunc(p.order, func(a, b int) int {
+		return int(p.pose.states[a].order) - int(p.pose.states[b].order)
 	})
 }
 

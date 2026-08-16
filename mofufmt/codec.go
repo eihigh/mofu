@@ -251,8 +251,14 @@ func (e *encoder) animation(a *Animation) {
 }
 
 // maxCount bounds every length read from a file so that a corrupt or hostile
-// input cannot make the decoder allocate wildly.
+// input cannot claim absurd sizes outright.
 const maxCount = 1 << 28
+
+// allocChunk caps how much any decoder allocation may run ahead of the bytes
+// actually read. Lengths in the file are attacker-controlled; memory is only
+// ever grown after the data backing it has arrived, so a tiny input claiming
+// a huge array fails at the read, not at an allocation.
+const allocChunk = 1 << 16
 
 // decoder reads primitives, latching the first error.
 type decoder struct {
@@ -324,13 +330,7 @@ func (d *decoder) f32() float32 {
 }
 
 func (d *decoder) str() string {
-	n := d.count()
-	if d.err != nil || n == 0 {
-		return ""
-	}
-	b := make([]byte, n)
-	d.read(b)
-	return string(b)
+	return string(d.bytes())
 }
 
 func (d *decoder) bytes() []byte {
@@ -338,8 +338,16 @@ func (d *decoder) bytes() []byte {
 	if d.err != nil || n == 0 {
 		return nil
 	}
-	b := make([]byte, n)
-	d.read(b)
+	b := make([]byte, 0, min(n, allocChunk))
+	for len(b) < n {
+		m := min(n-len(b), allocChunk)
+		start := len(b)
+		b = append(b, make([]byte, m)...)
+		d.read(b[start:])
+		if d.err != nil {
+			return nil
+		}
+	}
 	return b
 }
 
@@ -347,12 +355,13 @@ func (d *decoder) f32s(n int) []float32 {
 	if d.err != nil || n == 0 {
 		return nil
 	}
-	v := make([]float32, n)
-	for i := range v {
-		v[i] = d.f32()
+	v := make([]float32, 0, min(n, allocChunk/4))
+	for i := 0; i < n; i++ {
+		x := d.f32()
 		if d.err != nil {
 			return nil
 		}
+		v = append(v, x)
 	}
 	return v
 }
@@ -361,12 +370,13 @@ func (d *decoder) u16s(n int) []uint16 {
 	if d.err != nil || n == 0 {
 		return nil
 	}
-	v := make([]uint16, n)
-	for i := range v {
-		v[i] = d.u16()
+	v := make([]uint16, 0, min(n, allocChunk/2))
+	for i := 0; i < n; i++ {
+		x := d.u16()
 		if d.err != nil {
 			return nil
 		}
+		v = append(v, x)
 	}
 	return v
 }
@@ -380,25 +390,20 @@ func (d *decoder) file() *File {
 	f.Canvas.PixelsPerUnit = d.f32()
 
 	if n := d.count(); n > 0 {
-		f.Textures = make([]Texture, n)
-		for i := range f.Textures {
-			f.Textures[i].Name = d.str()
-			f.Textures[i].Data = d.bytes()
+		for i := 0; i < n && d.err == nil; i++ {
+			f.Textures = append(f.Textures, Texture{Name: d.str(), Data: d.bytes()})
 		}
 	}
 
 	if n := d.count(); n > 0 {
-		f.Meshes = make([]Mesh, n)
-		for i := range f.Meshes {
+		for i := 0; i < n && d.err == nil; i++ {
+			f.Meshes = append(f.Meshes, Mesh{})
 			m := &f.Meshes[i]
 			m.ID = d.str()
 			m.TextureIndex = int32(d.svar())
 			m.Flags = MeshFlags(d.u8())
-			if n := d.count(); n > 0 {
-				m.Masks = make([]int32, n)
-				for j := range m.Masks {
-					m.Masks[j] = int32(d.svar())
-				}
+			for j, jn := 0, d.count(); j < jn && d.err == nil; j++ {
+				m.Masks = append(m.Masks, int32(d.svar()))
 			}
 			vc := d.count()
 			m.UVs = d.f32s(vc * 2)
@@ -414,38 +419,28 @@ func (d *decoder) file() *File {
 	}
 
 	if n := d.count(); n > 0 {
-		f.HitAreas = make([]HitArea, n)
-		for i := range f.HitAreas {
-			f.HitAreas[i].Name = d.str()
-			f.HitAreas[i].Mesh = int32(d.svar())
+		for i := 0; i < n && d.err == nil; i++ {
+			f.HitAreas = append(f.HitAreas, HitArea{Name: d.str(), Mesh: int32(d.svar())})
 		}
 	}
 
 	if n := d.count(); n > 0 {
-		f.Overlays = make([]Overlay, n)
-		for i := range f.Overlays {
+		for i := 0; i < n && d.err == nil; i++ {
+			f.Overlays = append(f.Overlays, Overlay{Name: d.str()})
 			o := &f.Overlays[i]
-			o.Name = d.str()
-			if n := d.count(); n > 0 {
-				o.Tracks = make([]OverlayTrack, n)
-				for j := range o.Tracks {
-					o.Tracks[j].DeltaPositions = d.f32s(d.count())
-					o.Tracks[j].DeltaOpacity = d.f32()
-				}
-			}
-			if d.err != nil {
-				return f
+			for j, jn := 0, d.count(); j < jn && d.err == nil; j++ {
+				o.Tracks = append(o.Tracks, OverlayTrack{
+					DeltaPositions: d.f32s(d.count()),
+					DeltaOpacity:   d.f32(),
+				})
 			}
 		}
 	}
 
 	if n := d.count(); n > 0 {
-		f.Animations = make([]Animation, n)
-		for i := range f.Animations {
+		for i := 0; i < n && d.err == nil; i++ {
+			f.Animations = append(f.Animations, Animation{})
 			d.animation(&f.Animations[i])
-			if d.err != nil {
-				return f
-			}
 		}
 	}
 	return f
@@ -459,34 +454,19 @@ func (d *decoder) animation(a *Animation) {
 	a.Loop = d.u8() != 0
 	a.FadeIn = d.f32()
 	a.FadeOut = d.f32()
-	if n := d.count(); n > 0 {
-		a.Events = make([]Event, n)
-		for i := range a.Events {
-			a.Events[i].Time = d.f32()
-			a.Events[i].Value = d.str()
-		}
+	for i, n := 0, d.count(); i < n && d.err == nil; i++ {
+		a.Events = append(a.Events, Event{Time: d.f32(), Value: d.str()})
 	}
-	if n := d.count(); n > 0 {
-		a.Tracks = make([]Track, n)
-		for i := range a.Tracks {
-			t := &a.Tracks[i]
-			t.Flags = TrackFlags(d.u8())
-			t.Positions = d.u16s(d.count())
-			t.Opacity = d.f32s(d.count())
-			if n := d.count(); n > 0 {
-				t.Order = make([]int32, n)
-				for j := range t.Order {
-					t.Order[j] = int32(d.svar())
-				}
-			}
-			if n := d.count(); n > 0 {
-				t.Visible = make([]uint8, n)
-				d.read(t.Visible)
-			}
-			t.Colors = d.f32s(d.count())
-			if d.err != nil {
-				return
-			}
+	for i, n := 0, d.count(); i < n && d.err == nil; i++ {
+		a.Tracks = append(a.Tracks, Track{})
+		t := &a.Tracks[i]
+		t.Flags = TrackFlags(d.u8())
+		t.Positions = d.u16s(d.count())
+		t.Opacity = d.f32s(d.count())
+		for j, jn := 0, d.count(); j < jn && d.err == nil; j++ {
+			t.Order = append(t.Order, int32(d.svar()))
 		}
+		t.Visible = d.bytes()
+		t.Colors = d.f32s(d.count())
 	}
 }

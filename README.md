@@ -262,12 +262,18 @@ Tests for the `mofu` package itself import Ebitengine, whose package
 initialiser needs a display; on a headless machine run them under
 `xvfb-run -a go test ./...`.
 
-The GPU side of the mask renderer cannot run inside `go test` (Ebitengine
-needs the process's main thread), so it has its own pixel-level check:
+The GPU side of rendering cannot run inside `go test` (Ebitengine needs the
+process's main thread), so it has its own pixel-level check covering the
+shader colour maths, all three blend modes, masks, cross-fades, overlays and
+colour scaling:
 
 ```sh
 xvfb-run -a go run ./internal/gputest
 ```
+
+The container decoder has a fuzz target (`go test -fuzz=FuzzDecode
+./mofufmt`), and `go test -bench . ./` benchmarks the CPU side of a frame --
+the whole sampling, blending and transform path runs allocation-free.
 
 ## Licence
 

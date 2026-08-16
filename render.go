@@ -45,16 +45,7 @@ func (p *Player) render(dst *ebiten.Image) {
 			}
 			continue
 		}
-		var inv float32
-		if inverted {
-			inv = 1
-		}
-		uniforms := map[string]any{
-			"InvGeoM":      append([]float32(nil), p.invGeoM[:]...),
-			"MaskRect":     append([]float32(nil), p.maskRects[gi][:]...),
-			"MaskInverted": inv,
-		}
-		p.drawMesh(dst, i, p.maskBufs[gi], uniforms)
+		p.drawMesh(dst, i, p.maskBufs[gi], p.maskUniforms(gi, inverted))
 	}
 }
 
@@ -88,6 +79,29 @@ func (p *Player) drawMesh(dst *ebiten.Image, i int, mask *ebiten.Image, uniforms
 	dst.DrawTrianglesShader(verts, mesh.Indices, shader, op)
 }
 
+// maskUniforms returns the mask shader's uniforms for one combination. The
+// maps and the slices inside them are cached and mutated in place each frame;
+// that is safe because DrawTrianglesShader copies uniform values out at call
+// time.
+func (p *Player) maskUniforms(gi int, inverted bool) map[string]any {
+	key := gi << 1
+	var inv float32
+	if inverted {
+		key |= 1
+		inv = 1
+	}
+	u, ok := p.uniforms[key]
+	if !ok {
+		u = map[string]any{
+			"InvGeoM":      p.invGeoM,
+			"MaskRect":     p.maskRects[gi],
+			"MaskInverted": inv,
+		}
+		p.uniforms[key] = u
+	}
+	return u
+}
+
 // prepareFrame resets the per-Draw mask state and captures the inverse of the
 // caller's GeoM, which the mask shader uses to map fragments back to canvas
 // space.
@@ -100,8 +114,13 @@ func (p *Player) prepareFrame(geom *ebiten.GeoM) {
 		n := len(p.model.maskGroups)
 		p.maskReady = make([]bool, n)
 		p.maskEmpty = make([]bool, n)
-		p.maskRects = make([][4]float32, n)
+		p.invGeoM = make([]float32, 6)
+		p.maskRects = make([][]float32, n)
+		for i := range p.maskRects {
+			p.maskRects[i] = make([]float32, 4)
+		}
 		p.maskBufs = make([]*ebiten.Image, n)
+		p.uniforms = make(map[int]map[string]any)
 	}
 	for i := range p.maskReady {
 		p.maskReady[i] = false
@@ -114,10 +133,12 @@ func (p *Player) prepareFrame(geom *ebiten.GeoM) {
 		return
 	}
 	g.Invert()
-	p.invGeoM = [6]float32{
-		float32(g.Element(0, 0)), float32(g.Element(0, 1)), float32(g.Element(0, 2)),
-		float32(g.Element(1, 0)), float32(g.Element(1, 1)), float32(g.Element(1, 2)),
-	}
+	p.invGeoM[0] = float32(g.Element(0, 0))
+	p.invGeoM[1] = float32(g.Element(0, 1))
+	p.invGeoM[2] = float32(g.Element(0, 2))
+	p.invGeoM[3] = float32(g.Element(1, 0))
+	p.invGeoM[4] = float32(g.Element(1, 1))
+	p.invGeoM[5] = float32(g.Element(1, 2))
 }
 
 // ensureMask renders a mask combination's silhouette for this frame, once.
@@ -144,10 +165,11 @@ func (p *Player) ensureMask(gi int) {
 	const inner = maskBufferSize - 2*maskPad
 	sx := inner / (rect[2] - rect[0])
 	sy := inner / (rect[3] - rect[1])
-	p.maskRects[gi] = [4]float32{
-		rect[0] - maskPad/sx, rect[1] - maskPad/sy,
-		rect[2] + maskPad/sx, rect[3] + maskPad/sy,
-	}
+	r := p.maskRects[gi]
+	r[0] = rect[0] - maskPad/sx
+	r[1] = rect[1] - maskPad/sy
+	r[2] = rect[2] + maskPad/sx
+	r[3] = rect[3] + maskPad/sy
 
 	for _, mi := range group {
 		mesh := &p.model.file.Meshes[mi]
