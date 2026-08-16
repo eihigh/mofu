@@ -20,8 +20,9 @@ import "math"
 // Magic identifies a .mofu file.
 var Magic = [4]byte{'M', 'O', 'F', 'U'}
 
-// Version is the container version this package reads and writes.
-const Version uint32 = 1
+// Version is the container version this package reads and writes. Version 2
+// stores animated vertex positions as second-order temporal deltas.
+const Version uint32 = 2
 
 // Container flags.
 const (

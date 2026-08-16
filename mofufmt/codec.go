@@ -157,6 +157,36 @@ func (e *encoder) u16s(v []uint16) {
 	}
 }
 
+// positions writes a quantised position stream as second-order deltas.
+//
+// Vertex animation is smooth, so the change of the per-frame change (the
+// acceleration) is near zero for almost every sample; stored as zigzag
+// varints it costs a byte or two each and compresses far better than the raw
+// stream. Layout: the first frame is a spatial delta chain, the second frame
+// deltas against the first, and every later sample stores the change of its
+// component's temporal delta. stride is the number of values per frame.
+func (e *encoder) positions(v []uint16, stride int) {
+	e.uvar(uint64(len(v)))
+	s := stride
+	if s <= 0 || s > len(v) {
+		s = len(v)
+	}
+	for i, x := range v {
+		var d int64
+		switch {
+		case i == 0:
+			d = int64(x)
+		case i < s:
+			d = int64(x) - int64(v[i-1])
+		case i < 2*s:
+			d = int64(x) - int64(v[i-s])
+		default:
+			d = (int64(x) - int64(v[i-s])) - (int64(v[i-s]) - int64(v[i-2*s]))
+		}
+		e.svar(d)
+	}
+}
+
 func (e *encoder) file(f *File) {
 	e.f32(f.Canvas.Width)
 	e.f32(f.Canvas.Height)
@@ -208,13 +238,17 @@ func (e *encoder) file(f *File) {
 		}
 	}
 
+	strides := make([]int, len(f.Meshes))
+	for i := range f.Meshes {
+		strides[i] = f.Meshes[i].VertexCount() * 2
+	}
 	e.uvar(uint64(len(f.Animations)))
 	for i := range f.Animations {
-		e.animation(&f.Animations[i])
+		e.animation(&f.Animations[i], strides)
 	}
 }
 
-func (e *encoder) animation(a *Animation) {
+func (e *encoder) animation(a *Animation, strides []int) {
 	e.str(a.Name)
 	e.str(a.Sound)
 	e.f32(a.FPS)
@@ -235,8 +269,11 @@ func (e *encoder) animation(a *Animation) {
 	for i := range a.Tracks {
 		t := &a.Tracks[i]
 		e.u8(uint8(t.Flags))
-		e.uvar(uint64(len(t.Positions)))
-		e.u16s(t.Positions)
+		stride := 0
+		if i < len(strides) {
+			stride = strides[i]
+		}
+		e.positions(t.Positions, stride)
 		e.uvar(uint64(len(t.Opacity)))
 		e.f32s(t.Opacity)
 		e.uvar(uint64(len(t.Order)))
@@ -366,6 +403,39 @@ func (d *decoder) f32s(n int) []float32 {
 	return v
 }
 
+// positions reverses the second-order delta stream written by
+// encoder.positions.
+func (d *decoder) positions(stride int) []uint16 {
+	n := d.count()
+	if d.err != nil || n == 0 {
+		return nil
+	}
+	s := stride
+	if s <= 0 || s > n {
+		s = n
+	}
+	v := make([]uint16, 0, min(n, allocChunk/2))
+	for i := 0; i < n; i++ {
+		dd := d.svar()
+		if d.err != nil {
+			return nil
+		}
+		var x int64
+		switch {
+		case i == 0:
+			x = dd
+		case i < s:
+			x = int64(v[i-1]) + dd
+		case i < 2*s:
+			x = int64(v[i-s]) + dd
+		default:
+			x = 2*int64(v[i-s]) - int64(v[i-2*s]) + dd
+		}
+		v = append(v, uint16(x))
+	}
+	return v
+}
+
 func (d *decoder) u16s(n int) []uint16 {
 	if d.err != nil || n == 0 {
 		return nil
@@ -437,16 +507,20 @@ func (d *decoder) file() *File {
 		}
 	}
 
+	strides := make([]int, len(f.Meshes))
+	for i := range f.Meshes {
+		strides[i] = f.Meshes[i].VertexCount() * 2
+	}
 	if n := d.count(); n > 0 {
 		for i := 0; i < n && d.err == nil; i++ {
 			f.Animations = append(f.Animations, Animation{})
-			d.animation(&f.Animations[i])
+			d.animation(&f.Animations[i], strides)
 		}
 	}
 	return f
 }
 
-func (d *decoder) animation(a *Animation) {
+func (d *decoder) animation(a *Animation, strides []int) {
 	a.Name = d.str()
 	a.Sound = d.str()
 	a.FPS = d.f32()
@@ -461,7 +535,11 @@ func (d *decoder) animation(a *Animation) {
 		a.Tracks = append(a.Tracks, Track{})
 		t := &a.Tracks[i]
 		t.Flags = TrackFlags(d.u8())
-		t.Positions = d.u16s(d.count())
+		stride := 0
+		if i < len(strides) {
+			stride = strides[i]
+		}
+		t.Positions = d.positions(stride)
 		t.Opacity = d.f32s(d.count())
 		for j, jn := 0, d.count(); j < jn && d.err == nil; j++ {
 			t.Order = append(t.Order, int32(d.svar()))

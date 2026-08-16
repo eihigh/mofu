@@ -234,12 +234,17 @@ body      gzip, unless -raw
               visibility, multiply and screen colour
 ```
 
-Two things keep it small:
+Three things keep it small:
 
 * **Positions are 16-bit.** Each mesh carries the bounding box covering every
   pose it takes in every animation, and positions are stored as fractions of
   it. That is half the size of floats, and the error is a 65535th of a mesh's
   own range.
+* **Animated positions are stored as second-order deltas.** Vertex animation
+  is smooth, so the change of the per-frame change — the acceleration — is
+  near zero almost everywhere. Stored as zigzag varints it costs a byte or
+  two per sample and gzips far better than the raw stream: a smooth
+  100-vertex, 10-second motion drops from ~113 KiB to ~11 KiB.
 * **Still channels are stored once.** A channel is written as a single sample
   until the frame where it first changes. In a typical model most drawables
   hold still through most motions, so most tracks cost one frame. Scalar

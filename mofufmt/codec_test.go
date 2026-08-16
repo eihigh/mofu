@@ -2,6 +2,7 @@ package mofufmt
 
 import (
 	"bytes"
+	"math"
 	"reflect"
 	"testing"
 )
@@ -160,4 +161,93 @@ func TestChannelAccessorsClamp(t *testing.T) {
 	if empty.ScreenAt(0) != [4]float32{0, 0, 0, 1} {
 		t.Error("empty track should read as identity screen")
 	}
+}
+
+// TestPositionDeltaRoundTrip drives the second-order delta codec through the
+// shapes that exercise each of its branches: single frame, two frames, many
+// frames, streams shorter than a frame, and no stride information at all.
+func TestPositionDeltaRoundTrip(t *testing.T) {
+	smooth := func(frames, stride int) []uint16 {
+		v := make([]uint16, frames*stride)
+		for f := 0; f < frames; f++ {
+			for i := 0; i < stride; i++ {
+				v[f*stride+i] = uint16(30000 + 5000*f/(frames+1) + i*13)
+			}
+		}
+		return v
+	}
+	cases := []struct {
+		name   string
+		values []uint16
+		stride int
+	}{
+		{"one frame", smooth(1, 8), 8},
+		{"two frames", smooth(2, 8), 8},
+		{"many frames", smooth(50, 8), 8},
+		{"extremes", []uint16{0, 65535, 65535, 0, 0, 65535, 65535, 0}, 4},
+		{"no stride", smooth(3, 4), 0},
+		{"stride larger than data", smooth(1, 4), 100},
+		{"empty", nil, 8},
+	}
+	for _, tc := range cases {
+		f := &File{
+			Meshes: []Mesh{{UVs: make([]float32, tc.stride)}}, // VertexCount*2 == stride
+			Animations: []Animation{{
+				Name: "a", FPS: 30, FrameCount: 1,
+				Tracks: []Track{{Positions: tc.values}},
+			}},
+		}
+		if tc.stride == 0 {
+			f.Meshes[0].UVs = nil
+		}
+		var buf bytes.Buffer
+		if err := Encode(&buf, f, EncodeOptions{Uncompressed: true}); err != nil {
+			t.Fatalf("%s: encode: %v", tc.name, err)
+		}
+		got, err := Decode(bytes.NewReader(buf.Bytes()))
+		if err != nil {
+			t.Fatalf("%s: decode: %v", tc.name, err)
+		}
+		if !reflect.DeepEqual(got.Animations[0].Tracks[0].Positions, tc.values) {
+			t.Errorf("%s: positions did not round trip", tc.name)
+		}
+	}
+}
+
+// TestSmoothMotionCompresses pins the point of the delta encoding: a smooth
+// 100-vertex, 300-frame motion (117 KiB of raw quantised samples) must land
+// far below what storing the samples verbatim under gzip achieves (~113 KiB).
+func TestSmoothMotionCompresses(t *testing.T) {
+	const verts, frames = 100, 300
+	stride := verts * 2
+	f := &File{
+		Meshes: []Mesh{{UVs: make([]float32, stride), MinX: -1, MinY: -1, MaxX: 1, MaxY: 1}},
+	}
+	tr := Track{Flags: TrackPositionsAnimated, Positions: make([]uint16, frames*stride)}
+	for fr := 0; fr < frames; fr++ {
+		tt := float64(fr) / 30
+		for i := 0; i < stride; i++ {
+			phase := float64(i) * 0.37
+			v := 32767 + 6000*math.Sin(2*math.Pi*tt/4+phase)
+			tr.Positions[fr*stride+i] = uint16(v)
+		}
+	}
+	f.Animations = []Animation{{Name: "a", FPS: 30, FrameCount: frames, Tracks: []Track{tr}}}
+
+	var buf bytes.Buffer
+	if err := Encode(&buf, f, EncodeOptions{}); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() > 40<<10 {
+		t.Errorf("smooth motion encoded to %d KiB; the delta coding should stay well under 40 KiB", buf.Len()>>10)
+	}
+	// And it still round-trips exactly.
+	got, err := Decode(bytes.NewReader(buf.Bytes()))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got.Animations[0].Tracks[0].Positions, tr.Positions) {
+		t.Error("smooth motion did not round trip")
+	}
+	t.Logf("raw samples: %d KiB, encoded file: %d KiB", frames*stride*2>>10, buf.Len()>>10)
 }
