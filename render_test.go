@@ -93,31 +93,24 @@ func TestNewModel(t *testing.T) {
 
 // newGeometryPlayer builds a Player over f without allocating GPU resources.
 func newGeometryPlayer(f *mofufmt.File) *Player {
-	m := &Model{file: f, byName: map[string]int{}}
-	for i := range f.Animations {
-		m.byName[f.Animations[i].Name] = i
-	}
-	p := &Player{
-		model: m,
-		anim:  0,
-		speed: 1,
-		verts: make([][]ebiten.Vertex, len(f.Meshes)),
-		order: make([]int, len(f.Meshes)),
-		state: make([]meshState, len(f.Meshes)),
-	}
-	for i := range f.Meshes {
-		p.verts[i] = make([]ebiten.Vertex, f.Meshes[i].VertexCount())
-	}
-	return p
+	return newModelCommon(f).NewPlayer()
+}
+
+// sampleAndTransform runs the sampling half of Draw: pose, overlays, then the
+// GeoM transform into the vertex buffers.
+func (p *Player) sampleAndTransform(geom *ebiten.GeoM) {
+	p.samplePose(&p.cur, &p.pose)
+	p.applyOverlays()
+	p.poseValid = true
+	p.buildVerts(geom)
 }
 
 func TestBuildVerticesMapsCanvasToScreen(t *testing.T) {
 	f := quadFile(t)
 	p := newGeometryPlayer(f)
-	a := &f.Animations[0]
 
 	var g ebiten.GeoM
-	p.buildVertices(a, 0, 0, 0, &g)
+	p.sampleAndTransform(&g)
 
 	// Model space has Y up with the origin at the canvas centre; the
 	// destination has Y down with the origin at the top left.
@@ -132,7 +125,7 @@ func TestBuildVerticesMapsCanvasToScreen(t *testing.T) {
 	// A caller's GeoM applies on top of the canvas mapping.
 	g.Scale(0.5, 0.5)
 	g.Translate(10, 20)
-	p.buildVertices(a, 0, 0, 0, &g)
+	p.sampleAndTransform(&g)
 	if v := p.verts[0][1]; v.DstX != 42 || v.DstY != 52 {
 		t.Errorf("transformed vertex = (%v, %v), want (42, 52)", v.DstX, v.DstY)
 	}
@@ -157,7 +150,8 @@ func TestBuildVerticesInterpolates(t *testing.T) {
 	p := newGeometryPlayer(f)
 
 	var g ebiten.GeoM
-	p.buildVertices(&f.Animations[0], 0, 1, 0.5, &g)
+	p.SetTime(0.25) // frame 0.5 at 2 fps: halfway between frames 0 and 1
+	p.sampleAndTransform(&g)
 	// Frame 0 puts the vertex at (32, 32), frame 1 at (64, 0); halfway is
 	// (48, 16).
 	// The tolerance covers the 16-bit position quantisation.
@@ -182,18 +176,21 @@ func TestSampleAndSortOrder(t *testing.T) {
 	f.Animations[0].Tracks = []mofufmt.Track{back, mid, front}
 
 	p := newGeometryPlayer(f)
-	p.sample(&f.Animations[0], 0, 0, 0, 0.5)
+	p.samplePose(&p.cur, &p.pose)
+	for i := range p.pose.states {
+		p.pose.states[i].opacity *= 0.5 // the draw call's Alpha
+	}
 	p.sortOrder()
 
 	if got := p.order; got[0] != 1 || got[1] != 2 || got[2] != 0 {
 		t.Errorf("draw order = %v, want [1 2 0]", got)
 	}
-	if p.state[1].visible {
+	if p.pose.states[1].visible {
 		t.Error("mesh 1 should be invisible")
 	}
 	// Opacity 0.5 scaled by the draw call's alpha of 0.5.
-	if !closeTo(p.state[2].opacity, 0.25) {
-		t.Errorf("mesh 2 opacity = %v, want 0.25", p.state[2].opacity)
+	if !closeTo(p.pose.states[2].opacity, 0.25) {
+		t.Errorf("mesh 2 opacity = %v, want 0.25", p.pose.states[2].opacity)
 	}
 }
 
@@ -216,4 +213,134 @@ func TestBlendFor(t *testing.T) {
 func within(got, want, tol float32) bool {
 	d := got - want
 	return d < tol && d > -tol
+}
+
+// twoPoseFile builds a model with two single-frame animations: "left" pins a
+// one-triangle mesh to the canvas's left half, "right" to its right half.
+func twoPoseFile() *mofufmt.File {
+	const q = 65535
+	// Base and apex y differ, so the triangle has real area: base at model
+	// y=-1 (canvas y=64), apex at model y=1 (canvas y=0).
+	track := func(xs ...uint16) []mofufmt.Track {
+		pos := []uint16{xs[0], 0, xs[1], 0, xs[2], q}
+		return []mofufmt.Track{{
+			Positions: pos, Opacity: []float32{1}, Order: []int32{0}, Visible: []uint8{1},
+		}}
+	}
+	return &mofufmt.File{
+		Canvas: mofufmt.Canvas{Width: 64, Height: 64, OriginX: 32, OriginY: 32, PixelsPerUnit: 32},
+		Meshes: []mofufmt.Mesh{{
+			ID:      "tri",
+			UVs:     []float32{0, 0, 1, 0, 0.5, 1},
+			Indices: []uint16{0, 1, 2},
+			MinX:    -1, MinY: -1, MaxX: 1, MaxY: 1,
+		}},
+		HitAreas: []mofufmt.HitArea{{Name: "Tri", Mesh: 0}},
+		Overlays: []mofufmt.Overlay{{
+			Name: "shift",
+			// Push every vertex +0.5 model units in x (16 canvas pixels).
+			Tracks: []mofufmt.OverlayTrack{{
+				DeltaPositions: []float32{0.5, 0, 0.5, 0, 0.5, 0},
+			}},
+		}},
+		Animations: []mofufmt.Animation{
+			{Name: "left", FPS: 30, FrameCount: 1, Tracks: track(0, q/2, q/4)},
+			{Name: "right", FPS: 30, FrameCount: 1, FadeIn: 1, Tracks: track(q/2, q, 3*q/4)},
+		},
+	}
+}
+
+func TestCrossFadeBlendsPositions(t *testing.T) {
+	p := newGeometryPlayer(twoPoseFile())
+	var g ebiten.GeoM
+
+	// "left" alone: vertex 0 sits at canvas x=0.
+	p.sampleAndTransform(&g)
+	if got := p.verts[0][0].DstX; !within(got, 0, 0.01) {
+		t.Fatalf("left pose vertex x = %v, want 0", got)
+	}
+
+	// Halfway through a 1s fade to "right", vertex 0 is halfway between its
+	// left-pose x=0 and right-pose x=32.
+	if err := p.Play("right"); err != nil {
+		t.Fatal(err)
+	}
+	p.Advance(0.5)
+	p.samplePose(&p.cur, &p.pose)
+	p.samplePose(p.prev, &p.scratch)
+	mixPose(&p.pose, &p.scratch, 1-float32(p.fadeElapsed/p.fadeDur))
+	p.buildVerts(&g)
+	if got := p.verts[0][0].DstX; !within(got, 16, 0.01) {
+		t.Errorf("mid-fade vertex x = %v, want 16", got)
+	}
+
+	// After the fade only the new pose remains.
+	p.Advance(0.6)
+	p.sampleAndTransform(&g)
+	if got := p.verts[0][0].DstX; !within(got, 32, 0.01) {
+		t.Errorf("post-fade vertex x = %v, want 32", got)
+	}
+}
+
+func TestOverlayShiftsPose(t *testing.T) {
+	p := newGeometryPlayer(twoPoseFile())
+	var g ebiten.GeoM
+
+	if err := p.SetOverlay("nope", 1); err == nil {
+		t.Error("SetOverlay with an unknown name succeeded")
+	}
+	if err := p.SetOverlay("shift", 1); err != nil {
+		t.Fatal(err)
+	}
+	p.sampleAndTransform(&g)
+	// 0.5 model units * 32 px/unit = 16 pixels right of the plain pose.
+	if got := p.verts[0][0].DstX; !within(got, 16, 0.01) {
+		t.Errorf("overlaid vertex x = %v, want 16", got)
+	}
+
+	// Half weight halves the shift.
+	if err := p.SetOverlay("shift", 0.5); err != nil {
+		t.Fatal(err)
+	}
+	p.sampleAndTransform(&g)
+	if got := p.verts[0][0].DstX; !within(got, 8, 0.01) {
+		t.Errorf("half-weight vertex x = %v, want 8", got)
+	}
+
+	// Weight zero removes it.
+	if err := p.SetOverlay("shift", 0); err != nil {
+		t.Fatal(err)
+	}
+	p.sampleAndTransform(&g)
+	if got := p.verts[0][0].DstX; !within(got, 0, 0.01) {
+		t.Errorf("removed overlay vertex x = %v, want 0", got)
+	}
+}
+
+func TestHitTest(t *testing.T) {
+	p := newGeometryPlayer(twoPoseFile())
+
+	// The "left" pose is a triangle with its base spanning canvas x in
+	// [0, 32] at y=64 and its apex at (16, 0); its centroid is inside.
+	if hits := p.HitTest(16, 32); len(hits) != 1 || hits[0] != "Tri" {
+		t.Errorf("HitTest inside = %v, want [Tri]", hits)
+	}
+	if hits := p.HitTest(60, 32); hits != nil {
+		t.Errorf("HitTest outside = %v, want none", hits)
+	}
+	// An invisible mesh cannot be hit.
+	p.pose.states[0].visible = false
+	if hits := p.HitTest(16, 32); hits != nil {
+		t.Errorf("HitTest on an invisible mesh = %v, want none", hits)
+	}
+}
+
+func TestModelNames(t *testing.T) {
+	m := newModelCommon(twoPoseFile())
+	if got := m.OverlayNames(); len(got) != 1 || got[0] != "shift" {
+		t.Errorf("OverlayNames = %v", got)
+	}
+	if got := m.HitAreaNames(); len(got) != 1 || got[0] != "Tri" {
+		t.Errorf("HitAreaNames = %v", got)
+	}
 }

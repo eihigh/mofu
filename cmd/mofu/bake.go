@@ -16,6 +16,8 @@ func bakeCmd(args []string) error {
 	corePath := fs.String("core", "", "path to the Cubism Core library (default: autodetect)")
 	fps := fs.Float64("fps", 0, "sampling rate; 0 keeps each motion's own Meta.Fps")
 	raw := fs.Bool("raw", false, "skip gzip compression of the body")
+	withPhysics := fs.Bool("physics", true, "simulate physics3.json offline and bake the result")
+	withExpressions := fs.Bool("expressions", true, "bake exp3.json expressions as overlays")
 	quiet := fs.Bool("q", false, "only report errors")
 	var motions stringList
 	fs.Var(&motions, "motion", "extra .motion3.json to bake; repeatable")
@@ -33,10 +35,12 @@ func bakeCmd(args []string) error {
 	}
 
 	opts := bake.Options{
-		CorePath:     *corePath,
-		FPS:          *fps,
-		Motions:      motions,
-		Uncompressed: *raw,
+		CorePath:        *corePath,
+		FPS:             *fps,
+		Motions:         motions,
+		SkipPhysics:     !*withPhysics,
+		SkipExpressions: !*withExpressions,
+		Uncompressed:    *raw,
 	}
 	if !*quiet {
 		opts.Logf = func(format string, args ...any) {
@@ -70,8 +74,9 @@ func bakeCmd(args []string) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(os.Stderr, "wrote %s (%s): %d meshes, %d textures, %d animations\n",
-			dst, humanBytes(st.Size()), len(res.File.Meshes), len(res.File.Textures), len(res.File.Animations))
+		fmt.Fprintf(os.Stderr, "wrote %s (%s): %d meshes, %d textures, %d animations, %d overlays\n",
+			dst, humanBytes(st.Size()), len(res.File.Meshes), len(res.File.Textures),
+			len(res.File.Animations), len(res.File.Overlays))
 	}
 	return nil
 }

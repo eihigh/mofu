@@ -6,7 +6,10 @@
 // keyframed vertex positions and a handful of per-drawable channels. That is
 // the classic vertex-animation ("morph target") layout, with the 2D extras a
 // Live2D model needs bolted on: a texture index, clipping masks, a render
-// order and Cubism's multiply/screen colours.
+// order and Cubism's multiply/screen colours. Expressions survive as
+// overlays -- additive pose deltas, the classic blend-shape trick -- and the
+// pieces of the export a runtime still wants (hit areas, motion sound names,
+// timed user-data events) ride along.
 //
 // The package has no dependency on the Cubism Core or on Ebitengine, so both
 // the converter and the runtime can share it.
@@ -31,7 +34,35 @@ type File struct {
 	Canvas     Canvas
 	Textures   []Texture
 	Meshes     []Mesh
+	HitAreas   []HitArea
+	Overlays   []Overlay
 	Animations []Animation
+}
+
+// HitArea names a mesh for hit testing, copied from the model3.json.
+type HitArea struct {
+	Name string
+	Mesh int32
+}
+
+// Overlay is a baked expression: the difference between the model's rest pose
+// with and without the expression applied, stored as additive per-vertex
+// deltas. Layering it onto a playing animation is the classic additive
+// blend-shape approximation -- exact at the rest pose, and close enough
+// elsewhere for the small corrections expressions are made of.
+type Overlay struct {
+	Name string
+	// Tracks is parallel to File.Meshes.
+	Tracks []OverlayTrack
+}
+
+// OverlayTrack is one mesh's share of an overlay.
+type OverlayTrack struct {
+	// DeltaPositions is x,y offsets in model units per vertex
+	// (2*VertexCount values), or empty when the mesh does not move.
+	DeltaPositions []float32
+	// DeltaOpacity is added to the mesh's opacity.
+	DeltaOpacity float32
 }
 
 // Canvas describes the model's coordinate system, copied from
@@ -126,15 +157,30 @@ func quant(v, lo, hi float32) uint16 {
 
 // Animation is one baked motion, sampled at a fixed rate.
 type Animation struct {
-	Name       string
+	Name string
+	// Sound is the audio file the model3.json associates with the motion,
+	// as a path relative to the model. The audio itself is not embedded;
+	// the game decides how to play it.
+	Sound      string
 	FPS        float32
 	FrameCount int32
 	Loop       bool
 	FadeIn     float32
 	FadeOut    float32
 
+	// Events are the motion's timed user-data entries, sorted by time.
+	Events []Event
+
 	// Tracks is parallel to File.Meshes.
 	Tracks []Track
+}
+
+// Event is one timed user-data entry of an animation.
+type Event struct {
+	// Time is the position within the animation, in seconds.
+	Time float32
+	// Value is the user data, verbatim from the motion3.json.
+	Value string
 }
 
 // Duration is the animation's length in seconds.

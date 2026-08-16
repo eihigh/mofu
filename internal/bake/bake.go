@@ -17,8 +17,14 @@ import (
 
 	"github.com/eihigh/mofu/internal/core"
 	"github.com/eihigh/mofu/internal/cubism"
+	"github.com/eihigh/mofu/internal/physics"
 	"github.com/eihigh/mofu/mofufmt"
 )
+
+// settleSeconds is how long physics is run with frozen parameters before an
+// animation starts recording, so pendulums begin from equilibrium instead of
+// from their reset pose.
+const settleSeconds = 2.0
 
 // RestAnimation is the name given to the single-frame animation holding the
 // model's default pose. It is always emitted first.
@@ -33,6 +39,11 @@ type Options struct {
 	// Motions are extra .motion3.json paths to bake in addition to the ones
 	// the model3.json references.
 	Motions []string
+	// SkipPhysics leaves physics out even when the model has a physics3.json.
+	SkipPhysics bool
+	// SkipExpressions leaves expressions out instead of baking them as
+	// overlays.
+	SkipExpressions bool
 	// Uncompressed leaves the output body uncompressed.
 	Uncompressed bool
 	// Logf, when set, receives progress messages.
@@ -76,7 +87,58 @@ func Run(path string, opts Options) (*Result, error) {
 	}
 
 	b := &baker{model: model, m3: m3, opts: &opts}
+	b.loadPhysics()
 	return b.run()
+}
+
+// loadPhysics wires up the physics3.json referenced by the model, if any.
+func (b *baker) loadPhysics() {
+	rel := b.m3.FileReferences.Physics
+	if rel == "" {
+		return
+	}
+	if b.opts.SkipPhysics {
+		b.warn("physics (%s) skipped (-physics=false)", rel)
+		return
+	}
+	data, err := os.ReadFile(b.m3.Resolve(rel))
+	if err != nil {
+		b.warn("physics (%s) skipped: %v", rel, err)
+		return
+	}
+	sim, err := physics.New(data)
+	if err != nil {
+		b.warn("physics (%s) skipped: %v", rel, err)
+		return
+	}
+	b.sim = sim
+	b.opts.logf("physics %s: %d pendulum chains, simulated offline", rel, sim.SettingCount())
+	b.warn("physics is baked from motion parameters only (approximation); live input such as dragging is not reproduced")
+}
+
+// physicsParams adapts the Core's parameter storage to physics.Params.
+type physicsParams struct{ b *baker }
+
+func (p physicsParams) Get(id string) (float32, bool) {
+	i, ok := p.b.paramIndex[id]
+	if !ok {
+		return 0, false
+	}
+	return p.b.paramValues[i], true
+}
+
+func (p physicsParams) Set(id string, v float32) {
+	if i, ok := p.b.paramIndex[id]; ok {
+		p.b.paramValues[i] = v
+	}
+}
+
+func (p physicsParams) Range(id string) (min, max, def float32, ok bool) {
+	i, ok := p.b.paramIndex[id]
+	if !ok {
+		return 0, 0, 0, false
+	}
+	return p.b.paramMins[i], p.b.paramMaxs[i], p.b.paramDefaults[i], true
 }
 
 // baker holds the state shared by both sampling passes.
@@ -84,6 +146,7 @@ type baker struct {
 	model *core.Model
 	m3    *cubism.Model3
 	opts  *Options
+	sim   *physics.Simulator
 
 	warnings []string
 
@@ -91,6 +154,8 @@ type baker struct {
 	// so they are resolved once.
 	paramValues   []float32
 	paramDefaults []float32
+	paramMins     []float32
+	paramMaxs     []float32
 	paramIndex    map[string]int
 	partOpacities []float32
 	partIndex     map[string]int
@@ -110,6 +175,7 @@ type baker struct {
 type source struct {
 	name    string
 	motion  *cubism.Motion3 // nil for the rest pose
+	sound   string
 	loop    bool
 	fadeIn  float32
 	fadeOut float32
@@ -147,8 +213,126 @@ func (b *baker) run() (*Result, error) {
 	for i := range b.sources {
 		f.Animations = append(f.Animations, *b.bakeAnimation(&b.sources[i]))
 	}
+	b.bakeHitAreas(f)
+	b.bakeOverlays(f)
 	b.noteUnbakeables()
 	return &Result{File: f, Warnings: b.warnings}, nil
+}
+
+// bakeHitAreas maps the model3.json hit areas onto mesh indices.
+func (b *baker) bakeHitAreas(f *mofufmt.File) {
+	byID := make(map[string]int, len(f.Meshes))
+	for i := range f.Meshes {
+		byID[f.Meshes[i].ID] = i
+	}
+	for _, h := range b.m3.HitAreas {
+		mi, ok := byID[h.Id]
+		if !ok {
+			b.warn("hit area %q points at unknown drawable %q, skipped", h.Name, h.Id)
+			continue
+		}
+		name := h.Name
+		if name == "" {
+			name = h.Id
+		}
+		f.HitAreas = append(f.HitAreas, mofufmt.HitArea{Name: name, Mesh: int32(mi)})
+	}
+}
+
+// poseSnapshot is one captured deformation, used to diff expressions against
+// the rest pose.
+type poseSnapshot struct {
+	positions [][]core.Vec2
+	opacities []float32
+}
+
+// capturePose poses the model at its defaults, lets mutate adjust the
+// parameters, runs physics to equilibrium, updates and deep-copies the result.
+func (b *baker) capturePose(mutate func()) poseSnapshot {
+	rest := &b.sources[0]
+	b.applyMotion(rest, 0)
+	if mutate != nil {
+		mutate()
+	}
+	if b.sim != nil {
+		b.sim.Reset()
+		for i := 0; i < int(settleSeconds*30); i++ {
+			b.sim.Update(1.0/30, physicsParams{b})
+		}
+	}
+	b.model.Update()
+	snap := poseSnapshot{
+		positions: make([][]core.Vec2, len(b.positions)),
+		opacities: append([]float32(nil), b.opacities...),
+	}
+	for i, ps := range b.positions {
+		snap.positions[i] = append([]core.Vec2(nil), ps...)
+	}
+	return snap
+}
+
+// bakeOverlays turns each expression into an additive pose delta against the
+// rest pose.
+func (b *baker) bakeOverlays(f *mofufmt.File) {
+	refs := b.m3.FileReferences.Expressions
+	if len(refs) == 0 {
+		return
+	}
+	if b.opts.SkipExpressions {
+		b.warn("%d expression(s) skipped (-expressions=false)", len(refs))
+		return
+	}
+	base := b.capturePose(nil)
+	seen := map[string]bool{}
+	for _, ref := range refs {
+		name := ref.Name
+		if name == "" {
+			name = strings.TrimSuffix(filepath.Base(ref.File), ".exp3.json")
+		}
+		if seen[name] {
+			b.warn("duplicate expression name %q, skipped", name)
+			continue
+		}
+		e, err := cubism.LoadExpression3(b.m3.Resolve(ref.File))
+		if err != nil {
+			b.warn("skipping expression %s: %v", name, err)
+			continue
+		}
+		seen[name] = true
+		snap := b.capturePose(func() { b.applyExpression(e) })
+
+		ov := mofufmt.Overlay{Name: name, Tracks: make([]mofufmt.OverlayTrack, len(f.Meshes))}
+		for mi := range f.Meshes {
+			tr := &ov.Tracks[mi]
+			moved := false
+			deltas := make([]float32, 0, len(base.positions[mi])*2)
+			for v := range base.positions[mi] {
+				dx := snap.positions[mi][v].X - base.positions[mi][v].X
+				dy := snap.positions[mi][v].Y - base.positions[mi][v].Y
+				if dx != 0 || dy != 0 {
+					moved = true
+				}
+				deltas = append(deltas, dx, dy)
+			}
+			if moved {
+				tr.DeltaPositions = deltas
+			}
+			tr.DeltaOpacity = snap.opacities[mi] - base.opacities[mi]
+		}
+		f.Overlays = append(f.Overlays, ov)
+		b.opts.logf("expression %-21s baked as an overlay", name)
+	}
+}
+
+// applyExpression layers an expression's parameter adjustments over the
+// current parameter values.
+func (b *baker) applyExpression(e *cubism.Expression3) {
+	for i := range e.Parameters {
+		p := &e.Parameters[i]
+		if idx, ok := b.paramIndex[p.Id]; ok {
+			b.paramValues[idx] = float32(p.Apply(float64(b.paramValues[idx])))
+		}
+	}
 }
 
 // bind resolves the Core-owned slices and the id lookup tables.
@@ -156,6 +340,8 @@ func (b *baker) bind() {
 	m := b.model
 	b.paramValues = m.ParameterValues()
 	b.paramDefaults = append([]float32(nil), m.ParameterDefaults()...)
+	b.paramMins = append([]float32(nil), m.ParameterMinimums()...)
+	b.paramMaxs = append([]float32(nil), m.ParameterMaximums()...)
 	b.paramIndex = indexOf(m.ParameterIDs())
 	b.partOpacities = m.PartOpacities()
 	b.partIndex = indexOf(m.PartIDs())
@@ -285,6 +471,7 @@ func (b *baker) collectSources() {
 		b.sources = append(b.sources, source{
 			name:    j.name,
 			motion:  mo,
+			sound:   j.ref.Sound,
 			loop:    mo.Meta.Loop,
 			fadeIn:  float32(j.ref.FadeInTime),
 			fadeOut: float32(j.ref.FadeOutTime),
@@ -295,8 +482,9 @@ func (b *baker) collectSources() {
 	}
 }
 
-// pose drives the model to the state of src at frame f and updates it.
-func (b *baker) pose(src *source, f int) {
+// applyMotion sets every parameter and part opacity to the state of src at
+// frame f, without running physics or updating the model.
+func (b *baker) applyMotion(src *source, f int) {
 	copy(b.paramValues, b.paramDefaults)
 	for i := range b.partOpacities {
 		b.partOpacities[i] = 1
@@ -318,6 +506,36 @@ func (b *baker) pose(src *source, f int) {
 				}
 			}
 		}
+	}
+}
+
+// pose drives the model to the state of src at frame f, runs physics if the
+// model has it, and updates the Core. Frames must be visited in order from 0;
+// both baking passes do, which is what keeps the physics identical between
+// them.
+func (b *baker) pose(src *source, f int) {
+	b.applyMotion(src, f)
+	if b.sim != nil {
+		dt := 1 / src.fps
+		if f == 0 {
+			b.sim.Reset()
+			// Settle into equilibrium under the first frame's parameters.
+			for i := 0; i < int(settleSeconds*src.fps); i++ {
+				b.sim.Update(dt, physicsParams{b})
+			}
+			// For a looping motion, additionally run one unrecorded loop so
+			// the recorded first frame already carries the state the last
+			// frame hands back to it. The physics is not periodic, so the
+			// seam is only approximate, but this keeps it small.
+			if src.loop && src.frames > 1 {
+				for g := 0; g < src.frames; g++ {
+					b.applyMotion(src, g)
+					b.sim.Update(dt, physicsParams{b})
+				}
+				b.applyMotion(src, 0)
+			}
+		}
+		b.sim.Update(dt, physicsParams{b})
 	}
 	b.model.Update()
 }
@@ -360,12 +578,19 @@ func (b *baker) measure() {
 func (b *baker) bakeAnimation(src *source) *mofufmt.Animation {
 	a := &mofufmt.Animation{
 		Name:       src.name,
+		Sound:      filepath.ToSlash(src.sound),
 		FPS:        float32(src.fps),
 		FrameCount: int32(src.frames),
 		Loop:       src.loop,
 		FadeIn:     src.fadeIn,
 		FadeOut:    src.fadeOut,
 		Tracks:     make([]mofufmt.Track, len(b.meshes)),
+	}
+	if src.motion != nil {
+		for _, u := range src.motion.UserData {
+			a.Events = append(a.Events, mofufmt.Event{Time: float32(u.Time), Value: u.Value})
+		}
+		sort.SliceStable(a.Events, func(i, j int) bool { return a.Events[i].Time < a.Events[j].Time })
 	}
 
 	pos := make([]channel[uint16], len(b.meshes))
@@ -395,7 +620,7 @@ func (b *baker) bakeAnimation(src *source) *mofufmt.Animation {
 			}
 			pos[d].push(q)
 
-			one[0] = b.opacities[d]
+			one[0] = roundChannel(b.opacities[d])
 			opa[d].push(one[:1])
 
 			ord[d].pushOne(b.orders[d])
@@ -414,7 +639,10 @@ func (b *baker) bakeAnimation(src *source) *mofufmt.Animation {
 			if b.screens != nil {
 				scr = b.screens[d]
 			}
-			one = [8]float32{mul.X, mul.Y, mul.Z, mul.W, scr.X, scr.Y, scr.Z, scr.W}
+			one = [8]float32{
+				roundChannel(mul.X), roundChannel(mul.Y), roundChannel(mul.Z), roundChannel(mul.W),
+				roundChannel(scr.X), roundChannel(scr.Y), roundChannel(scr.Z), roundChannel(scr.W),
+			}
 			col[d].push(one[:])
 		}
 	}
@@ -448,6 +676,14 @@ func (b *baker) bakeAnimation(src *source) *mofufmt.Animation {
 		}
 	}
 	return a
+}
+
+// roundChannel snaps a scalar channel sample to 1/4096 steps. The step is far
+// below anything visible, and it keeps channels foldable: without it, the
+// asymptotic tail of a settling physics chain leaves every frame differing in
+// the last few bits and defeats the constant-channel optimisation.
+func roundChannel(v float32) float32 {
+	return float32(math.Round(float64(v)*4096) / 4096)
 }
 
 func isIdentityColor(c []float32) bool {
@@ -539,19 +775,7 @@ func (b *baker) loadTextures() ([]mofufmt.Texture, error) {
 // noteUnbakeables reports the parts of a Cubism export that a baked format
 // cannot represent, so the user is not left wondering where they went.
 func (b *baker) noteUnbakeables() {
-	fr := &b.m3.FileReferences
-	if fr.Physics != "" {
-		b.warn("physics (%s) is simulated from live input and cannot be baked", fr.Physics)
-	}
-	if fr.Pose != "" {
+	if fr := &b.m3.FileReferences; fr.Pose != "" {
 		b.warn("pose (%s) resolves part visibility at run time and is not baked", fr.Pose)
-	}
-	if len(fr.Expressions) > 0 {
-		names := make([]string, 0, len(fr.Expressions))
-		for _, e := range fr.Expressions {
-			names = append(names, e.Name)
-		}
-		sort.Strings(names)
-		b.warn("%d expression(s) not baked: %s", len(names), strings.Join(names, ", "))
 	}
 }

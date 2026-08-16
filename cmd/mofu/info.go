@@ -49,9 +49,28 @@ func infoCmd(args []string) error {
 		fmt.Printf("          %s (%s)\n", t.Name, humanBytes(int64(len(t.Data))))
 	}
 
+	if len(file.HitAreas) > 0 {
+		fmt.Printf("hit areas %d\n", len(file.HitAreas))
+		for _, h := range file.HitAreas {
+			fmt.Printf("          %s -> mesh %d\n", h.Name, h.Mesh)
+		}
+	}
+	if len(file.Overlays) > 0 {
+		fmt.Printf("overlays  %d\n", len(file.Overlays))
+		for i := range file.Overlays {
+			moved := 0
+			for j := range file.Overlays[i].Tracks {
+				if file.Overlays[i].Tracks[j].DeltaPositions != nil {
+					moved++
+				}
+			}
+			fmt.Printf("          %s (%d/%d meshes move)\n", file.Overlays[i].Name, moved, len(file.Overlays[i].Tracks))
+		}
+	}
+
 	fmt.Printf("animations %d\n", len(file.Animations))
 	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	fmt.Fprintln(w, "  name\tframes\tfps\tseconds\tloop\tmoving meshes")
+	fmt.Fprintln(w, "  name\tframes\tfps\tseconds\tloop\tmoving\tevents\tsound")
 	for i := range file.Animations {
 		a := &file.Animations[i]
 		moving := 0
@@ -60,8 +79,12 @@ func infoCmd(args []string) error {
 				moving++
 			}
 		}
-		fmt.Fprintf(w, "  %s\t%d\t%g\t%.2f\t%v\t%d/%d\n",
-			a.Name, a.FrameCount, a.FPS, a.Duration(), a.Loop, moving, len(a.Tracks))
+		sound := a.Sound
+		if sound == "" {
+			sound = "-"
+		}
+		fmt.Fprintf(w, "  %s\t%d\t%g\t%.2f\t%v\t%d/%d\t%d\t%s\n",
+			a.Name, a.FrameCount, a.FPS, a.Duration(), a.Loop, moving, len(a.Tracks), len(a.Events), sound)
 	}
 	w.Flush()
 

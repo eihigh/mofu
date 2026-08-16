@@ -35,7 +35,11 @@ type Model struct {
 	// namely the texture coordinates. Players copy from these.
 	templates [][]ebiten.Vertex
 
-	byName map[string]int
+	byName    map[string]int
+	byOverlay map[string]int
+	// overlayDeltas is the overlays' position deltas converted to canvas
+	// pixels, indexed [overlay][mesh]; a nil inner slice means no movement.
+	overlayDeltas [][][]float32
 }
 
 // LoadFile reads a .mofu file from disk.
@@ -59,7 +63,7 @@ func Load(r io.Reader) (*Model, error) {
 
 // New builds a playable model from already-decoded data.
 func New(f *mofufmt.File) (*Model, error) {
-	m := &Model{file: f}
+	m := newModelCommon(f)
 
 	shader, err := ebiten.NewShader(shaderSrc)
 	if err != nil {
@@ -94,11 +98,44 @@ func New(f *mofufmt.File) (*Model, error) {
 		m.templates[i] = verts
 	}
 
+	return m, nil
+}
+
+// newModelCommon builds the GPU-free part of a Model: the lookup tables and
+// the overlay deltas in canvas space. Tests use it to exercise playback
+// without a graphics context.
+func newModelCommon(f *mofufmt.File) *Model {
+	m := &Model{file: f}
 	m.byName = make(map[string]int, len(f.Animations))
 	for i := range f.Animations {
 		m.byName[f.Animations[i].Name] = i
 	}
-	return m, nil
+	m.byOverlay = make(map[string]int, len(f.Overlays))
+	ppu := f.Canvas.PixelsPerUnit
+	if ppu == 0 {
+		ppu = 1
+	}
+	m.overlayDeltas = make([][][]float32, len(f.Overlays))
+	for oi := range f.Overlays {
+		m.byOverlay[f.Overlays[oi].Name] = oi
+		tracks := f.Overlays[oi].Tracks
+		deltas := make([][]float32, len(f.Meshes))
+		for mi := range f.Meshes {
+			if mi >= len(tracks) || tracks[mi].DeltaPositions == nil {
+				continue
+			}
+			src := tracks[mi].DeltaPositions
+			d := make([]float32, len(src))
+			for v := 0; v+1 < len(src); v += 2 {
+				// Model units to canvas pixels; canvas Y points down.
+				d[v] = src[v] * ppu
+				d[v+1] = -src[v+1] * ppu
+			}
+			deltas[mi] = d
+		}
+		m.overlayDeltas[oi] = deltas
+	}
+	return m
 }
 
 func (m *Model) texture(i int32) *ebiten.Image {
@@ -122,6 +159,25 @@ func (m *Model) AnimationNames() []string {
 		names = append(names, m.file.Animations[i].Name)
 	}
 	sort.Strings(names)
+	return names
+}
+
+// OverlayNames returns every overlay (baked expression), sorted.
+func (m *Model) OverlayNames() []string {
+	names := make([]string, 0, len(m.file.Overlays))
+	for i := range m.file.Overlays {
+		names = append(names, m.file.Overlays[i].Name)
+	}
+	sort.Strings(names)
+	return names
+}
+
+// HitAreaNames returns every hit area, in file order.
+func (m *Model) HitAreaNames() []string {
+	names := make([]string, 0, len(m.file.HitAreas))
+	for _, h := range m.file.HitAreas {
+		names = append(names, h.Name)
+	}
 	return names
 }
 

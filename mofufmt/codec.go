@@ -190,6 +190,24 @@ func (e *encoder) file(f *File) {
 		e.f32(m.MaxY)
 	}
 
+	e.uvar(uint64(len(f.HitAreas)))
+	for i := range f.HitAreas {
+		e.str(f.HitAreas[i].Name)
+		e.svar(int64(f.HitAreas[i].Mesh))
+	}
+
+	e.uvar(uint64(len(f.Overlays)))
+	for i := range f.Overlays {
+		o := &f.Overlays[i]
+		e.str(o.Name)
+		e.uvar(uint64(len(o.Tracks)))
+		for j := range o.Tracks {
+			e.uvar(uint64(len(o.Tracks[j].DeltaPositions)))
+			e.f32s(o.Tracks[j].DeltaPositions)
+			e.f32(o.Tracks[j].DeltaOpacity)
+		}
+	}
+
 	e.uvar(uint64(len(f.Animations)))
 	for i := range f.Animations {
 		e.animation(&f.Animations[i])
@@ -198,6 +216,7 @@ func (e *encoder) file(f *File) {
 
 func (e *encoder) animation(a *Animation) {
 	e.str(a.Name)
+	e.str(a.Sound)
 	e.f32(a.FPS)
 	e.uvar(uint64(a.FrameCount))
 	if a.Loop {
@@ -207,6 +226,11 @@ func (e *encoder) animation(a *Animation) {
 	}
 	e.f32(a.FadeIn)
 	e.f32(a.FadeOut)
+	e.uvar(uint64(len(a.Events)))
+	for i := range a.Events {
+		e.f32(a.Events[i].Time)
+		e.str(a.Events[i].Value)
+	}
 	e.uvar(uint64(len(a.Tracks)))
 	for i := range a.Tracks {
 		t := &a.Tracks[i]
@@ -390,6 +414,32 @@ func (d *decoder) file() *File {
 	}
 
 	if n := d.count(); n > 0 {
+		f.HitAreas = make([]HitArea, n)
+		for i := range f.HitAreas {
+			f.HitAreas[i].Name = d.str()
+			f.HitAreas[i].Mesh = int32(d.svar())
+		}
+	}
+
+	if n := d.count(); n > 0 {
+		f.Overlays = make([]Overlay, n)
+		for i := range f.Overlays {
+			o := &f.Overlays[i]
+			o.Name = d.str()
+			if n := d.count(); n > 0 {
+				o.Tracks = make([]OverlayTrack, n)
+				for j := range o.Tracks {
+					o.Tracks[j].DeltaPositions = d.f32s(d.count())
+					o.Tracks[j].DeltaOpacity = d.f32()
+				}
+			}
+			if d.err != nil {
+				return f
+			}
+		}
+	}
+
+	if n := d.count(); n > 0 {
 		f.Animations = make([]Animation, n)
 		for i := range f.Animations {
 			d.animation(&f.Animations[i])
@@ -403,11 +453,19 @@ func (d *decoder) file() *File {
 
 func (d *decoder) animation(a *Animation) {
 	a.Name = d.str()
+	a.Sound = d.str()
 	a.FPS = d.f32()
 	a.FrameCount = int32(d.count())
 	a.Loop = d.u8() != 0
 	a.FadeIn = d.f32()
 	a.FadeOut = d.f32()
+	if n := d.count(); n > 0 {
+		a.Events = make([]Event, n)
+		for i := range a.Events {
+			a.Events[i].Time = d.f32()
+			a.Events[i].Value = d.str()
+		}
+	}
 	if n := d.count(); n > 0 {
 		a.Tracks = make([]Track, n)
 		for i := range a.Tracks {

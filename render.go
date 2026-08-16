@@ -8,7 +8,7 @@ import (
 // render draws every visible mesh in render order.
 func (p *Player) render(dst *ebiten.Image) {
 	for _, i := range p.order {
-		s := &p.state[i]
+		s := &p.pose.states[i]
 		if !s.visible || s.opacity <= 0 {
 			continue
 		}
@@ -28,7 +28,7 @@ func (p *Player) drawMesh(dst *ebiten.Image, i int, blend ebiten.Blend) {
 	if tex == nil {
 		return
 	}
-	s := &p.state[i]
+	s := &p.pose.states[i]
 	verts := p.verts[i]
 	for v := range verts {
 		verts[v].ColorR = s.multiply[0]
@@ -41,7 +41,6 @@ func (p *Player) drawMesh(dst *ebiten.Image, i int, blend ebiten.Blend) {
 	}
 	op := &ebiten.DrawTrianglesShaderOptions{Blend: blend}
 	op.Images[0] = tex
-	op.AntiAlias = false
 	dst.DrawTrianglesShader(verts, mesh.Indices, p.model.shader, op)
 }
 

@@ -15,7 +15,9 @@ samples every motion, and writes out the results. What is left is a set of
 static meshes plus keyframed vertex positions: classic 3D vertex animation
 with the handful of 2D extras a Live2D model needs — a texture index, clipping
 masks, a render order, and Cubism's multiply/screen colours. Playing that back
-is ordinary mesh interpolation.
+is ordinary mesh interpolation. On the same principle, expressions become
+additive pose deltas (classic blend shapes) and physics is simulated offline
+during the bake, with each motion's parameters as the input.
 
 The trade is deliberate:
 
@@ -74,17 +76,24 @@ mofu-play hiyori.mofu
 
 `mofu bake` flags:
 
-| Flag              | Meaning                                                       |
-| ----------------- | ------------------------------------------------------------- |
-| `-o <path>`       | Output path. Defaults to the input's name with a `.mofu` suffix. |
-| `-fps <n>`        | Sampling rate. `0` (the default) keeps each motion's own `Meta.Fps`. |
-| `-motion <path>`  | Bake an extra `.motion3.json` not listed in the model3.json. Repeatable. |
-| `-core <path>`    | Use a specific Cubism Core library.                            |
-| `-raw`            | Skip gzip compression of the body.                             |
-| `-q`              | Only report errors.                                            |
+| Flag                 | Meaning                                                       |
+| -------------------- | ------------------------------------------------------------- |
+| `-o <path>`          | Output path. Defaults to the input's name with a `.mofu` suffix. |
+| `-fps <n>`           | Sampling rate. `0` (the default) keeps each motion's own `Meta.Fps`. |
+| `-motion <path>`     | Bake an extra `.motion3.json` not listed in the model3.json. Repeatable. |
+| `-physics=false`     | Skip the offline physics simulation.                          |
+| `-expressions=false` | Skip baking expressions as overlays.                          |
+| `-core <path>`       | Use a specific Cubism Core library.                           |
+| `-raw`               | Skip gzip compression of the body.                            |
+| `-q`                 | Only report errors.                                           |
 
 Every model gets an `@rest` animation: a single frame with all parameters at
 their defaults.
+
+When the model has a `physics3.json`, every motion is baked with physics
+running: chains settle for two seconds before frame zero, and looping motions
+are pre-rolled one full loop so the recorded first frame already carries the
+state the last frame hands back to it.
 
 ## Play
 
@@ -143,22 +152,58 @@ state, so draw the same model many times by making several players.
 Vertex positions come out in canvas pixels with the origin at the top left, so
 `Model.CanvasSize` is the box to fit with `DrawOptions.GeoM`.
 
-## What does not survive baking
+### Beyond looping one motion
 
-Sampling ahead of time is what buys the runtime its independence, and it is
-also exactly what these features cannot tolerate. `mofu bake` prints a warning
-for each one it finds.
+```go
+// Cross-fade into another motion over its baked FadeInTime
+// (or pick your own duration).
+player.Play("TapBody")
+player.PlayWithFade("Idle", 0.3)
 
-* **Physics** (`.physics3.json`) is a simulation driven by live input. There
-  is nothing to sample.
-* **Pose** (`.pose3.json`) switches part visibility at run time.
-* **Expressions** (`.exp3.json`) compose *on top of* whatever motion is
-  playing. A baked frame is already composited, so they cannot be layered back
-  on afterwards.
+// Motions carry a sound file name and timed user-data events.
+if s := player.Animation().Sound; s != "" {
+	playAudio(s)
+}
+for _, e := range player.PollEvents() { // call once per frame after Update
+	log.Println("event:", e.Value)
+}
+
+// Expressions are baked as overlays: additive pose deltas layered over
+// whatever is playing. Animate the weight yourself for a fade.
+player.SetOverlay("smile", 1)
+
+// Hit areas from the model3.json, tested against the current pose.
+g := op.GeoM
+g.Invert()
+cx, cy := g.Apply(mouseX, mouseY)
+for _, name := range player.HitTest(cx, cy) {
+	log.Println("touched:", name)
+}
+```
+
+## Approximations and what does not survive baking
+
+Sampling ahead of time is what buys the runtime its independence. Two features
+survive it only as approximations, and two not at all; `mofu bake` prints a
+warning for anything it approximates or drops.
+
+* **Physics** (`.physics3.json`) is simulated offline with each motion's
+  parameters as the only input, then baked like any other deformation. What
+  is lost is *live* input: dragging the model around will not make its hair
+  swing, and a looping motion's physics seam is pre-rolled to be small rather
+  than exactly periodic.
+* **Expressions** (`.exp3.json`) are baked as **overlays**: the difference
+  between the rest pose with and without the expression, replayed as an
+  additive per-vertex delta. That is the classic additive blend-shape
+  approximation — exact at the rest pose, slightly off where an expression
+  interacts nonlinearly with an extreme motion pose.
+* **Pose** (`.pose3.json`) switches part visibility at run time and is not
+  baked.
 * **Arbitrary parameter control** — head tracking, lip sync driven by live
-  audio, mouse following. Baked frames are the only poses available.
+  audio, mouse following. Baked frames (plus overlay weights) are the only
+  poses available.
 
-If you need any of these, you want a Core binding rather than this.
+If you need live parameter control, you want a Core binding rather than this.
 
 ## The `.mofu` container
 
@@ -172,7 +217,10 @@ body      gzip, unless -raw
   textures  the original image bytes, copied verbatim
   meshes    id, texture index, blend flags, mask list, UVs, indices,
             and the bounding box positions are quantised against
+  hit areas hit area name -> mesh index
+  overlays  per mesh: additive position deltas and an opacity delta
   animations
+    sound file name, timed user-data events
     per mesh: quantised vertex positions, opacity, render order,
               visibility, multiply and screen colour
 ```
@@ -185,7 +233,9 @@ Two things keep it small:
   own range.
 * **Still channels are stored once.** A channel is written as a single sample
   until the frame where it first changes. In a typical model most drawables
-  hold still through most motions, so most tracks cost one frame.
+  hold still through most motions, so most tracks cost one frame. Scalar
+  channels are snapped to 1/4096 steps — far below anything visible — so the
+  asymptotic tail of a settling physics chain cannot defeat the folding.
 
 ## Development
 

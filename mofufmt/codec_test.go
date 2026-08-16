@@ -30,6 +30,16 @@ func sample() *File {
 				Indices:      []uint16{0, 1, 1},
 			},
 		},
+		HitAreas: []HitArea{{Name: "Body", Mesh: 0}, {Name: "Head", Mesh: 1}},
+		Overlays: []Overlay{
+			{
+				Name: "smile",
+				Tracks: []OverlayTrack{
+					{DeltaPositions: []float32{0.1, -0.2, 0, 0, 0, 0, 0.3, 0.4}, DeltaOpacity: 0},
+					{DeltaOpacity: -0.5},
+				},
+			},
+		},
 		Animations: []Animation{
 			{
 				Name: "@rest", FPS: 30, FrameCount: 1, Loop: false,
@@ -39,7 +49,8 @@ func sample() *File {
 				},
 			},
 			{
-				Name: "Idle", FPS: 60, FrameCount: 3, Loop: true, FadeIn: 0.5, FadeOut: 0.25,
+				Name: "Idle", Sound: "sounds/idle.wav", FPS: 60, FrameCount: 3, Loop: true, FadeIn: 0.5, FadeOut: 0.25,
+				Events: []Event{{Time: 0.5, Value: "blink"}, {Time: 1.5, Value: "step"}},
 				Tracks: []Track{
 					{
 						Flags:     TrackPositionsAnimated | TrackHasColors | TrackColorsAnimated,
