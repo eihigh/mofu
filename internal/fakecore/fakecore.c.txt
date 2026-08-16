@@ -1,0 +1,186 @@
+/*
+ * A stand-in for the proprietary Live2D Cubism Core, for tests only.
+ *
+ * It implements the Live2DCubismCore.h entry points that mofu binds, over a
+ * hard-coded two-drawable model, so that the purego binding, the alignment
+ * handling and the whole bake pipeline can be exercised without the real
+ * library. It performs no deformation worth the name: one parameter slides
+ * the mesh sideways, another fades a drawable out. Nothing here is derived
+ * from Live2D's implementation.
+ */
+#include <stdint.h>
+#include <stddef.h>
+
+typedef struct { float X, Y; } csmVector2;
+typedef struct { float X, Y, Z, W; } csmVector4;
+
+#define PARAM_COUNT 2
+#define PART_COUNT  2
+#define DRAW_COUNT  2
+#define VERT_COUNT  4
+#define INDEX_COUNT 6
+
+static const char *paramIds[PARAM_COUNT] = {"ParamAngleX", "ParamEyeLOpen"};
+static float paramMin[PARAM_COUNT] = {-30.0f, 0.0f};
+static float paramMax[PARAM_COUNT] = {30.0f, 1.0f};
+static float paramDef[PARAM_COUNT] = {0.0f, 1.0f};
+static float paramVal[PARAM_COUNT] = {0.0f, 1.0f};
+static int32_t paramTypes[PARAM_COUNT] = {0, 0};
+static int32_t paramRepeats[PARAM_COUNT] = {0, 0};
+
+static const char *partIds[PART_COUNT] = {"PartBody", "PartEye"};
+static float partOpacity[PART_COUNT] = {1.0f, 1.0f};
+static int32_t partParents[PART_COUNT] = {-1, 0};
+
+static const char *drawIds[DRAW_COUNT] = {"body", "eye"};
+/* drawable 1 is additive and masked by drawable 0 */
+static uint8_t constantFlags[DRAW_COUNT] = {0, 1};
+static uint8_t dynamicFlags[DRAW_COUNT] = {1, 1};
+static int32_t textureIndices[DRAW_COUNT] = {0, 0};
+static int32_t renderOrders[DRAW_COUNT] = {0, 1};
+static int32_t drawOrders[DRAW_COUNT] = {0, 1};
+static int32_t drawParents[DRAW_COUNT] = {0, 1};
+static float opacities[DRAW_COUNT] = {1.0f, 1.0f};
+static int32_t vertexCounts[DRAW_COUNT] = {VERT_COUNT, VERT_COUNT};
+static int32_t indexCounts[DRAW_COUNT] = {INDEX_COUNT, INDEX_COUNT};
+
+static int32_t maskCounts[DRAW_COUNT] = {0, 1};
+static int32_t maskOfEye[1] = {0};
+static const int32_t *masks[DRAW_COUNT] = {NULL, maskOfEye};
+
+static csmVector2 basePos[DRAW_COUNT][VERT_COUNT] = {
+    {{-1.0f, -1.0f}, {1.0f, -1.0f}, {1.0f, 1.0f}, {-1.0f, 1.0f}},
+    {{-0.5f, 0.2f}, {0.5f, 0.2f}, {0.5f, 0.6f}, {-0.5f, 0.6f}},
+};
+static csmVector2 pos[DRAW_COUNT][VERT_COUNT];
+static csmVector2 uvs[DRAW_COUNT][VERT_COUNT] = {
+    {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}},
+    {{0.0f, 0.0f}, {1.0f, 0.0f}, {1.0f, 1.0f}, {0.0f, 1.0f}},
+};
+static uint16_t idx[DRAW_COUNT][INDEX_COUNT] = {
+    {0, 1, 2, 0, 2, 3},
+    {0, 1, 2, 0, 2, 3},
+};
+
+static const csmVector2 *posPtr[DRAW_COUNT];
+static const csmVector2 *uvPtr[DRAW_COUNT];
+static const uint16_t *idxPtr[DRAW_COUNT];
+
+static csmVector4 multiplyColors[DRAW_COUNT] = {{1, 1, 1, 1}, {1, 1, 1, 1}};
+static csmVector4 screenColors[DRAW_COUNT] = {{0, 0, 0, 1}, {0, 0, 0, 1}};
+
+/* The Go side only ever passes these back to us, so their contents are
+ * irrelevant; they exist so that pointer identity can be checked. */
+static int mocSentinel;
+static int modelSentinel;
+
+unsigned int csmGetVersion(void) { return (5u << 24) | (0u << 16) | 0u; }
+unsigned int csmGetLatestMocVersion(void) { return 6; }
+
+unsigned int csmGetMocVersion(const void *address, const unsigned int size) {
+    (void)address;
+    return size > 0 ? 4 : 0;
+}
+
+int csmHasMocConsistency(void *address, const unsigned int size) {
+    (void)address;
+    return size > 0 ? 1 : 0;
+}
+
+typedef void (*csmLogFunction)(const char *message);
+static csmLogFunction logFunction = NULL;
+void csmSetLogFunction(csmLogFunction handler) { logFunction = handler; }
+csmLogFunction csmGetLogFunction(void) { return logFunction; }
+
+void *csmReviveMocInPlace(void *address, const unsigned int size) {
+    if (address == NULL || size == 0) return NULL;
+    /* The real Core requires 64 byte alignment; assert the caller honours it
+     * so that a regression in mofu's alignment handling shows up here. */
+    if (((uintptr_t)address % 64) != 0) return NULL;
+    return &mocSentinel;
+}
+
+unsigned int csmGetSizeofModel(const void *moc) {
+    return moc == &mocSentinel ? 4096 : 0;
+}
+
+void *csmInitializeModelInPlace(const void *moc, void *address, const unsigned int size) {
+    int d, v;
+    if (moc != &mocSentinel || address == NULL || size < 4096) return NULL;
+    if (((uintptr_t)address % 16) != 0) return NULL;
+    for (d = 0; d < DRAW_COUNT; d++) {
+        posPtr[d] = pos[d];
+        uvPtr[d] = uvs[d];
+        idxPtr[d] = idx[d];
+        for (v = 0; v < VERT_COUNT; v++) pos[d][v] = basePos[d][v];
+    }
+    return &modelSentinel;
+}
+
+void csmResetDrawableDynamicFlags(void *model) {
+    int d;
+    (void)model;
+    for (d = 0; d < DRAW_COUNT; d++) dynamicFlags[d] &= (uint8_t)1;
+}
+
+void csmUpdateModel(void *model) {
+    int d, v;
+    float slide = paramVal[0] / 30.0f * 0.2f;
+    (void)model;
+    for (d = 0; d < DRAW_COUNT; d++) {
+        for (v = 0; v < VERT_COUNT; v++) {
+            pos[d][v].X = basePos[d][v].X + slide;
+            pos[d][v].Y = basePos[d][v].Y;
+        }
+    }
+    opacities[0] = partOpacity[0];
+    opacities[1] = paramVal[1] * partOpacity[1];
+    for (d = 0; d < DRAW_COUNT; d++) {
+        dynamicFlags[d] = (uint8_t)(opacities[d] > 0.0f ? 1 : 0);
+        /* vertex positions did change */
+        dynamicFlags[d] |= (uint8_t)(1 << 5);
+    }
+    /* The eye rises above the body only while it is wide open, which gives
+     * the render order something to do. */
+    renderOrders[1] = paramVal[1] > 0.5f ? 1 : -1;
+}
+
+void csmReadCanvasInfo(const void *model, csmVector2 *outSize, csmVector2 *outOrigin, float *outPixelsPerUnit) {
+    (void)model;
+    if (outSize) { outSize->X = 512.0f; outSize->Y = 1024.0f; }
+    if (outOrigin) { outOrigin->X = 256.0f; outOrigin->Y = 512.0f; }
+    if (outPixelsPerUnit) *outPixelsPerUnit = 256.0f;
+}
+
+int csmGetParameterCount(const void *m) { (void)m; return PARAM_COUNT; }
+const char **csmGetParameterIds(const void *m) { (void)m; return paramIds; }
+const float *csmGetParameterMinimumValues(const void *m) { (void)m; return paramMin; }
+const float *csmGetParameterMaximumValues(const void *m) { (void)m; return paramMax; }
+const float *csmGetParameterDefaultValues(const void *m) { (void)m; return paramDef; }
+float *csmGetParameterValues(void *m) { (void)m; return paramVal; }
+const int32_t *csmGetParameterTypes(const void *m) { (void)m; return paramTypes; }
+const int32_t *csmGetParameterRepeats(const void *m) { (void)m; return paramRepeats; }
+
+int csmGetPartCount(const void *m) { (void)m; return PART_COUNT; }
+const char **csmGetPartIds(const void *m) { (void)m; return partIds; }
+float *csmGetPartOpacities(void *m) { (void)m; return partOpacity; }
+const int32_t *csmGetPartParentPartIndices(const void *m) { (void)m; return partParents; }
+
+int csmGetDrawableCount(const void *m) { (void)m; return DRAW_COUNT; }
+const char **csmGetDrawableIds(const void *m) { (void)m; return drawIds; }
+const uint8_t *csmGetDrawableConstantFlags(const void *m) { (void)m; return constantFlags; }
+const uint8_t *csmGetDrawableDynamicFlags(const void *m) { (void)m; return dynamicFlags; }
+const int32_t *csmGetDrawableTextureIndices(const void *m) { (void)m; return textureIndices; }
+const int32_t *csmGetDrawableRenderOrders(const void *m) { (void)m; return renderOrders; }
+const int32_t *csmGetDrawableDrawOrders(const void *m) { (void)m; return drawOrders; }
+const int32_t *csmGetDrawableParentPartIndices(const void *m) { (void)m; return drawParents; }
+const float *csmGetDrawableOpacities(const void *m) { (void)m; return opacities; }
+const int32_t *csmGetDrawableMaskCounts(const void *m) { (void)m; return maskCounts; }
+const int32_t **csmGetDrawableMasks(const void *m) { (void)m; return masks; }
+const int32_t *csmGetDrawableVertexCounts(const void *m) { (void)m; return vertexCounts; }
+const csmVector2 **csmGetDrawableVertexPositions(const void *m) { (void)m; return posPtr; }
+const csmVector2 **csmGetDrawableVertexUvs(const void *m) { (void)m; return uvPtr; }
+const int32_t *csmGetDrawableIndexCounts(const void *m) { (void)m; return indexCounts; }
+const uint16_t **csmGetDrawableIndices(const void *m) { (void)m; return idxPtr; }
+const csmVector4 *csmGetDrawableMultiplyColors(const void *m) { (void)m; return multiplyColors; }
+const csmVector4 *csmGetDrawableScreenColors(const void *m) { (void)m; return screenColors; }

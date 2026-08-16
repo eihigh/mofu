@@ -1,0 +1,8 @@
+# The Live2D Cubism Core is proprietary and must never be committed here.
+libLive2DCubismCore.*
+Live2DCubismCore.dll
+
+# Build output.
+/mofu
+/mofu-play
+*.mofu

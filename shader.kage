@@ -1,0 +1,22 @@
+//kage:unit pixels
+
+package main
+
+// Cubism's fragment maths, in one pass.
+//
+// color carries (multiplyR, multiplyG, multiplyB, opacity) and custom carries
+// (screenR, screenG, screenB, unused). Keeping them in the vertices rather
+// than in uniforms means consecutive drawables still batch into one draw call.
+func Fragment(dstPos vec4, srcPos vec2, color vec4, custom vec4) vec4 {
+	src := imageSrc0At(srcPos)
+	if src.a == 0 {
+		return vec4(0)
+	}
+	// Ebitengine hands us premultiplied colour; Cubism's formula is defined
+	// on straight colour, so undo the premultiplication first.
+	rgb := src.rgb / src.a
+	rgb *= color.rgb
+	rgb = rgb + custom.rgb - rgb*custom.rgb
+	a := src.a * color.a
+	return vec4(rgb*a, a)
+}
